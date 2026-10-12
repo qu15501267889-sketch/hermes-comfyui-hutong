@@ -33,6 +33,15 @@
 1. **输入槽 index 只能从画布快照按 name 取**。用 object_info 的 required 键序推 = 错位 →
    connect 静默 `CONNECT_FAILED`（FaceDetailer 的 bbox/positive/negative 三条线因此从建起就没连上，
    直到导 api_prompt 才暴露）。
+   - **⚠️ autogrow 输入会让后面的槽整体右移（2026-10-12 实测）**：`TextEncodeQwenImage21.images`
+     是 `COMFY_AUTOGROW_V3` 动态输入，**一旦连上 `images.image_1`，前端立刻插入一个 `images.image_2`
+     空槽** → 其后的 vae / prompt / negative_prompt / resolution 各 +1 位。此时若按连接前读到的下标继续连
+     后面几条线，线会全部打偏（实测：负词串到了 prompt 上，vae 直接连空）。
+     **两条对策，都要做**：① **把 autogrow 输入放到最后连**（先连 clip/vae/prompt/negative，最后连 images）；
+     ② 每次 connect 前**重读快照 + 按目标输入名解析 index**，连完再重试校验。
+   - **⚠️ 快照同步 2.5s，连完立刻读会误判"失败"（同日实测）**：连完一条线马上读 `/graph`
+     仍显示 `link=None` → 误以为连失败而重连/乱改。**一律用「重试校验」循环**：读→若该槽 link 已是
+     非 None 就跳过，否则发一次 connect → 等 2.5s 再读，最多 3 轮。别拿单次读下结论。
 2. **widget 名必须先查 `object_info/<类型>`**。`hb_update_node {widgets:{错名:v}}` →
    **静默跳过且返回 ok:true**。经典例子：`ImageScaleToMaxDimension` 的边长 widget 叫
    **`largest_size`**（不是 `max_dimension` / `size`）。改完回读**存档 JSON** 的 `widgets_values`
