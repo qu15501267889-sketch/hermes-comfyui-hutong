@@ -69,3 +69,38 @@ class IterativeLatentUpscale:            # 行 1521
 - 放大段同样**必须走 ComfySwitchNode**：`PreviewImage` 若直连放大输出（不走开关），
   它是输出节点 → 引擎为执行它必然把整条放大链拉起来，**开关关了也照样跑**（本会话实测，
   332s 白跑）。四段预览接开关、唯独新增的放大预览漏接 = 踩过。
+
+## ⚠️ 更致命：Impact 的 upscale_model_opt 路子在 Qwen VAE 上直接崩（2026-10-13 实测）
+
+给 `PixelTiledKSampleUpscalerProvider.upscale_model_opt` 接 ESRGAN（`UpscaleModelLoader`
+→4x-UltraSharp）后**必崩**：
+
+```
+RuntimeError: Given groups=1, weight of size [64, 3, 3, 3],
+  expected input[1, 4, 512, 512] to have 3 channels, but got 4 channels instead
+  at impact/core.py:1619  model_upscaler.execute(upscale_model, pixels)
+```
+
+**原因**：`latent_upscale_on_pixel_space_with_model_shape2()`（core.py:1606）里
+`pixels = vae_decode(vae, samples, ...)` —— 而**这个 Qwen/Wan VAE 解码出来就是 4 通道
+（RGBA）**（旁证：所有 PreviewImage 落盘的 PNG 都是 RGBA）。ESRGAN(RRDBNet) 只吃 3 通道
+→ 崩。**这个 vae_decode 在 Impact 节点内部，外面接节点救不了。**
+
+**结论：别在 Impact 的放大链里塞 ESRGAN。** 正解是把两段式摊成显式节点，
+复用已被四段验证过的 TE+KSampler 模式：
+
+```
+[转RGB] ─┬→ UpscaleModelLoader(4x-UltraSharp) → ImageUpscaleWithModel(4x)
+         │                                        → ImageScaleToMaxDimension(长边2560, lanczos)
+         │                                        → TextEncodeQwenImage21(放大精修词)
+         │                                        → KSampler(denoise 0.2, 16步, cfg1, euler/simple)
+         │                                        → VAEDecode → SplitImageWithAlpha(转RGB) → 开关.on_true
+         └→ 开关.on_false（关时透传）
+```
+
+尺寸算法：992×1280 →ESRGAN 4x→ 3968×5120 →lanczos→ 长边2560 = **1984×2560**（真 2×）。
+`ImageScaleToMaxDimension` 按最长边缩，不用手算。
+
+**好处**：全程 3 通道、无 Impact 分块采样（少接缝）、显存友好（4× latent token 的
+attention 仍是小量级）、还能用开关透传。Qwen 只做 denoise 0.2 的精修 —— 放大交给 ESRGAN。
+
